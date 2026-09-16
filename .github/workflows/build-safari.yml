@@ -1,0 +1,97 @@
+name: Build Safari App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-safari:
+    name: Build unsigned Safari app
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install pnpm and dependencies
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: |
+            - args: [--frozen-lockfile]
+
+      - name: Build Safari extension files
+        run: pnpm build-safari
+
+      - name: Create the Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if xcrun --find safari-web-extension-packager >/dev/null 2>&1; then
+            packager=safari-web-extension-packager
+          else
+            packager=safari-web-extension-converter
+          fi
+
+          xcrun "$packager" ./extension-safari \
+            --project-location ./extension-safari-macos \
+            --app-name BewlyCat \
+            --bundle-identifier com.keleus.BewlyCat \
+            --swift \
+            --macos-only \
+            --copy-resources \
+            --no-open \
+            --no-prompt \
+            --force
+
+      - name: Build the unsigned macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          project_path="$(find extension-safari-macos -name '*.xcodeproj' -print -quit)"
+          if [[ -z "$project_path" ]]; then
+            echo "No generated Xcode project was found." >&2
+            exit 1
+          fi
+
+          scheme="$(xcodebuild -project "$project_path" -list -json | jq -er '.project.schemes[0]')"
+          xcodebuild \
+            -project "$project_path" \
+            -scheme "$scheme" \
+            -configuration Release \
+            -derivedDataPath "$PWD/build-data" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            build
+
+      - name: Package the app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="$(find build-data/Build/Products/Release -name 'BewlyCat.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "BewlyCat.app was not produced." >&2
+            find build-data/Build/Products -maxdepth 4 -print >&2 || true
+            exit 1
+          fi
+
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" BewlyCat-Safari-macOS.zip
+
+      - name: Upload BewlyCat app
+        uses: actions/upload-artifact@v4
+        with:
+          name: BewlyCat-Safari-macOS
+          path: BewlyCat-Safari-macOS.zip
+          if-no-files-found: error
+          retention-days: 7
