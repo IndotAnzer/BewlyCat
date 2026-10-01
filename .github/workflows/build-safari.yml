@@ -2,19 +2,53 @@ name: Build Safari App
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '17 1 * * *'
 
 permissions:
   contents: read
 
+concurrency:
+  group: safari-stable-release
+  cancel-in-progress: false
+
 jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.latest.outputs.version }}
+      needed: ${{ steps.latest.outputs.needed }}
+    steps:
+      - id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(gh api repos/keleus/BewlyCat/releases/latest --jq .tag_name)
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "safari-$version" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+
   build-safari:
+    needs: release
+    if: needs.release.outputs.needed == 'true'
     name: Build unsigned Safari app
     runs-on: macos-15
     timeout-minutes: 20
+    permissions:
+      contents: write
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          repository: keleus/BewlyCat
+          ref: ${{ needs.release.outputs.version }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -76,6 +110,8 @@ jobs:
 
       - name: Package the app
         shell: bash
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -86,7 +122,29 @@ jobs:
             exit 1
           fi
 
+          for bundle in "$app_path" "$app_path/Contents/PlugIns/BewlyCat Extension.appex"; do
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$bundle/Contents/Info.plist"
+          done
+          entitlements=$(find extension-safari-macos -name '*.entitlements' -print -quit)
+          test -n "$entitlements"
+          codesign --force --deep --sign - "$app_path"
+          codesign --force --sign - --entitlements "$entitlements" "$app_path/Contents/PlugIns/BewlyCat Extension.appex"
+          codesign --force --sign - --entitlements "$entitlements" "$app_path"
+          codesign --verify --deep --strict "$app_path"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" BewlyCat-Safari-macOS.zip
+          shasum -a 256 BewlyCat-Safari-macOS.zip > BewlyCat-Safari-macOS.zip.sha256
+
+      - name: Publish stable Safari release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+          BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          gh release create "safari-$VERSION" --repo "$REPOSITORY" --target "$BUILD_COMMIT" \
+            --title "BewlyCat Safari $VERSION" \
+            --notes "Built from the official keleus/BewlyCat release $VERSION. ARM64 macOS, ad-hoc signed for personal use." \
+            BewlyCat-Safari-macOS.zip BewlyCat-Safari-macOS.zip.sha256
 
       - name: Upload BewlyCat app
         uses: actions/upload-artifact@v4
