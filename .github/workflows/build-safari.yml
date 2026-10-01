@@ -28,7 +28,7 @@ jobs:
           version=$(gh api repos/keleus/BewlyCat/releases/latest --jq .tag_name)
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh release view "safari-$version" --repo "$REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "safari-$version-app2" --repo "$REPOSITORY" >/dev/null 2>&1; then
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=true' >> "$GITHUB_OUTPUT"
@@ -49,6 +49,12 @@ jobs:
         with:
           repository: keleus/BewlyCat
           ref: ${{ needs.release.outputs.version }}
+
+      - name: Check out Safari app updater
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .safari-builder
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -126,11 +132,17 @@ jobs:
             /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$bundle/Contents/Info.plist"
             /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$bundle/Contents/Info.plist"
           done
-          entitlements=$(find extension-safari-macos -name '*.entitlements' -print -quit)
-          test -n "$entitlements"
+          xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
+            .safari-builder/scripts/safari-app/main.swift \
+            -o "$app_path/Contents/MacOS/BewlyCat"
+          /usr/libexec/PlistBuddy -c 'Delete :NSMainStoryboardFile' "$app_path/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :BewlyCatUpdaterRevision integer 2' "$app_path/Contents/Info.plist"
+          ditto .safari-builder/scripts/safari-app/update-stable.sh "$app_path/Contents/Resources/update-stable.sh"
+          ditto .safari-builder/scripts/safari-app/extension.entitlements "$app_path/Contents/Resources/extension.entitlements"
+          entitlements=.safari-builder/scripts/safari-app/extension.entitlements
           codesign --force --deep --sign - "$app_path"
           codesign --force --sign - --entitlements "$entitlements" "$app_path/Contents/PlugIns/BewlyCat Extension.appex"
-          codesign --force --sign - --entitlements "$entitlements" "$app_path"
+          codesign --force --sign - "$app_path"
           codesign --verify --deep --strict "$app_path"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" BewlyCat-Safari-macOS.zip
           shasum -a 256 BewlyCat-Safari-macOS.zip > BewlyCat-Safari-macOS.zip.sha256
@@ -142,9 +154,9 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
           BUILD_COMMIT: ${{ github.sha }}
         run: |
-          gh release create "safari-$VERSION" --repo "$REPOSITORY" --target "$BUILD_COMMIT" \
-            --title "BewlyCat Safari $VERSION" \
-            --notes "Built from the official keleus/BewlyCat release $VERSION. ARM64 macOS, ad-hoc signed for personal use." \
+          gh release create "safari-$VERSION-app2" --repo "$REPOSITORY" --target "$BUILD_COMMIT" \
+            --title "BewlyCat Safari $VERSION (App 内置更新)" \
+            --notes "Built from official keleus/BewlyCat release $VERSION. Includes an app-owned stable updater. ARM64 macOS, ad-hoc signed for personal use." \
             BewlyCat-Safari-macOS.zip BewlyCat-Safari-macOS.zip.sha256
 
       - name: Upload BewlyCat app
