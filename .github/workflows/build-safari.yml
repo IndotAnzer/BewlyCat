@@ -124,6 +124,7 @@ jobs:
 
           for bundle in "$app_path" "$app_path/Contents/PlugIns/BewlyCat Extension.appex"; do
             /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$bundle/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$bundle/Contents/Info.plist"
           done
           entitlements=$(find extension-safari-macos -name '*.entitlements' -print -quit)
           test -n "$entitlements"
