@@ -39,6 +39,8 @@ digest=$(printf '%s' "$release" | jq -er '.assets[] | select(.name == "BewlyCat-
 [[ "$archive_url" == "https://github.com/$repo/releases/download/$tag/"* ]]
 [[ "$digest" == sha256:* ]]
 stage=$(mktemp -d "$state_dir/stage.XXXXXX")
+mv "$stage" "$stage.noindex"
+stage="$stage.noindex"
 archive_cache="$state_dir/$tag.zip"
 if [[ -f "$archive_cache" ]]; then
   ditto "$archive_cache" "$stage/BewlyCat-Safari-macOS.zip"
@@ -65,7 +67,8 @@ if [[ "${1:-}" == '--check-only' ]]; then
   echo "Verified stable update: $current -> $version ($stage)"
   exit 0
 fi
-backup="$state_dir/BewlyCat-$current-$(date +%Y%m%d%H%M%S).app"
+mkdir -p "$state_dir/backups.noindex"
+backup="$state_dir/backups.noindex/BewlyCat-$current-$(date +%Y%m%d%H%M%S).app"
 mv "$app" "$backup"
 rollback() {
   if [[ -e "$app" ]]; then mv "$app" "$stage/failed.app"; fi

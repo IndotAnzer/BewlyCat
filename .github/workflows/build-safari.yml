@@ -68,7 +68,9 @@ jobs:
             - args: [--frozen-lockfile]
 
       - name: Build Safari extension files
-        run: pnpm build-safari
+        run: |
+          node .safari-builder/scripts/safari-app/patch-upstream.mjs
+          pnpm build-safari
 
       - name: Create the Xcode project
         shell: bash
