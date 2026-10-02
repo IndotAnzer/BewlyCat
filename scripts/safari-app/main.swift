@@ -4,6 +4,9 @@ import SafariServices
 final class BewlyCatApp: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     let status = NSTextField(wrappingLabelWithString: "")
+    let extensionStatus = NSTextField(wrappingLabelWithString: "正在检查 Safari 扩展状态…")
+    var extensionButton: NSButton!
+    var checkingExtension = false
     var button: NSButton!
     var automatic: NSButton!
     var updater: Process?
@@ -22,7 +25,7 @@ final class BewlyCatApp: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 BewlyCat", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         NSApp.mainMenu = menu
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: 270),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 570, height: 400),
                           styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "BewlyCat"
         window.center()
@@ -36,11 +39,13 @@ final class BewlyCatApp: NSObject, NSApplicationDelegate {
         button.bezelStyle = .rounded
         let safari = NSButton(title: "打开 Safari 扩展设置", target: self, action: #selector(showSafari))
         safari.bezelStyle = .rounded
+        extensionButton = NSButton(title: "重新检测并注册扩展", target: self, action: #selector(repairExtension))
+        extensionButton.bezelStyle = .rounded
         automatic = NSButton(checkboxWithTitle: "App 运行时自动检查正式版本", target: self, action: #selector(toggleAutomatic))
         automatic.state = defaults.bool(forKey: "automaticStableUpdates") ? .on : .off
         let buttons = NSStackView(views: [button, safari])
         buttons.orientation = .horizontal
-        let stack = NSStackView(views: [title, detail, status, automatic, buttons])
+        let stack = NSStackView(views: [title, detail, extensionStatus, extensionButton, status, automatic, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
@@ -59,13 +64,19 @@ final class BewlyCatApp: NSObject, NSApplicationDelegate {
             self?.checkAutomatically()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if self.diagnostics { self.checkManually() } else { self.checkAutomatically() }
+            if self.diagnostics {
+                self.checkManually()
+            } else {
+                self.refreshExtension(showPrompt: true)
+                self.checkAutomatically()
+            }
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil)
+        refreshExtension(showPrompt: false)
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -78,8 +89,86 @@ final class BewlyCatApp: NSObject, NSApplicationDelegate {
     }
     @objc func toggleAutomatic() { defaults.set(automatic.state == .on, forKey: "automaticStableUpdates") }
     @objc func showSafari() {
+        refreshExtension(showPrompt: false, openSettings: true)
+    }
+    @objc func repairExtension() { refreshExtension(showPrompt: true) }
+
+    func openSafariSettings() {
         SFSafariApplication.showPreferencesForExtension(withIdentifier: "com.keleus.BewlyCat.Extension") { error in
-            if let error = error { DispatchQueue.main.async { self.status.stringValue = error.localizedDescription } }
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.extensionStatus.stringValue = "请手动打开 Safari → 设置 → 开发者，允许未签名的扩展并完成认证，再点击重新检测。\n设置打开失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func refreshExtension(showPrompt: Bool, openSettings: Bool = false) {
+        guard !checkingExtension else { return }
+        checkingExtension = true
+        extensionButton.isEnabled = false
+        extensionStatus.stringValue = "正在重新注册并检查 Safari 扩展…"
+        let bundlePath = Bundle.main.bundlePath
+        DispatchQueue.global(qos: .utility).async {
+            var registrationError: String?
+            // Register the installed copy only; never discover updater staging or backup copies.
+            if bundlePath == "/Applications/BewlyCat.app" {
+                let commands: [(String, [String])] = [
+                    ("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", ["-f", bundlePath]),
+                    ("/usr/bin/pluginkit", ["-a", bundlePath + "/Contents/PlugIns/BewlyCat Extension.appex"])
+                ]
+                for (path, arguments) in commands {
+                    do {
+                        let process = Process()
+                        process.executableURL = URL(fileURLWithPath: path)
+                        process.arguments = arguments
+                        process.standardOutput = FileHandle.nullDevice
+                        process.standardError = FileHandle.nullDevice
+                        try process.run()
+                        process.waitUntilExit()
+                        if process.terminationStatus != 0 { registrationError = "扩展注册失败，请检查 App 是否完整。"; break }
+                    } catch { registrationError = error.localizedDescription; break }
+                }
+            } else {
+                registrationError = "请先将 BewlyCat.app 安装到“应用程序”文件夹，再打开。"
+            }
+            let failure = registrationError
+            DispatchQueue.main.async {
+                if let failure = failure {
+                    self.checkingExtension = false
+                    self.extensionButton.isEnabled = true
+                    self.extensionStatus.stringValue = failure
+                    return
+                }
+                SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: "com.keleus.BewlyCat.Extension") { state, error in
+                    DispatchQueue.main.async {
+                        self.checkingExtension = false
+                        self.extensionButton.isEnabled = true
+                        if let state = state, error == nil, state.isEnabled {
+                            self.extensionStatus.stringValue = "✓ Safari 已识别并启用 BewlyCat。"
+                        } else {
+                            let instructions: String
+                            if state != nil && error == nil {
+                                instructions = "Safari 已识别扩展，但尚未启用。请在 Safari → 设置 → 扩展中勾选 BewlyCat。若列表没有显示，先到“开发者”中允许未签名的扩展。"
+                            } else {
+                                instructions = "Safari 尚未识别此临时签名扩展。请打开 Safari → 设置 → 开发者，勾选“允许未签名的扩展”并完成 Touch ID 或密码认证，然后回到这里点击“重新检测并注册扩展”。"
+                            }
+                            self.extensionStatus.stringValue = instructions
+                            if showPrompt && !openSettings {
+                                let alert = NSAlert()
+                                alert.messageText = "需要在 Safari 中启用扩展"
+                                alert.informativeText = instructions + "\n\nSafari 完全退出后会重置该开关。App 不会替你输入密码或绕过认证。"
+                                alert.addButton(withTitle: "打开 Safari 设置")
+                                alert.addButton(withTitle: "稍后")
+                                alert.beginSheetModal(for: self.window) { response in
+                                    if response == .alertFirstButtonReturn { self.openSafariSettings() }
+                                }
+                            }
+                        }
+                        if openSettings { self.openSafariSettings() }
+                    }
+                }
+            }
         }
     }
     func checkAutomatically() {
